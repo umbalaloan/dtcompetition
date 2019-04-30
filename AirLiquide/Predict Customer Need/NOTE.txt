@@ -1,0 +1,2 @@
+The score ranking is this competition is 70th
+F1 score of testing dataset is 79%
