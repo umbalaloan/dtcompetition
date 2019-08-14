@@ -1,0 +1,500 @@
+---
+title: "Time Series Analysis - Bitcoin Competition"
+author: "Loan Huynh - s3655461"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+# Introduction
+
+The aim of this project is trying to find the best model for forecasting Bit Coin price in next 10 days.</br>
+Dataset is collected from https://coinmarketcap.com/ website between 27 April 2013 to 24 Feb 2019.
+
+
+# Data Exploration
+
+_*Loading data and library*_
+
+```{r message=FALSE, warning=FALSE}
+# Load libraries
+library(TSA)
+library(fUnitRoots)
+library(forecast)
+library(CombMSC)
+library(lmtest)
+library(fGarch)
+library(rugarch)
+library(tseries)
+source("residual.analysis.R")
+source("TSHandy.r")
+source("MASE.R")
+
+# This function is used to fiting model
+modelfit <- function(garchOrder, armaOrder, data){
+  model <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = garchOrder), 
+                   mean.model = list(armaOrder = armaOrder, include.mean = FALSE), 
+                   distribution.model = "norm")
+  model.fit <- ugarchfit(spec=model,data=data, out.sample = 100)
+  return(model.fit)
+}
+
+
+# sortAIC_garch function is sort Garchmodels based on AIC values
+sortAIC_garch <- function(list_GarchOrder, resdata)
+{
+  rs <- data.frame(matrix(ncol = 2))
+  colnames(rs) <- c("GarchOrder", "AIC")
+  for (i in 1: length(list_GarchOrder))
+  {
+    garchOrder <- sapply(list_GarchOrder,function(x) unlist(x))[,i]
+    model <- garch(resdata, order = garchOrder)
+    aic <- AIC(model)
+    rs[i,] <- list(toString(garchOrder), aic)
+  }
+  return(rs[order(rs$AIC),])
+}
+
+
+# This function transform fitted residuals from forcasting ARIMA+GARCH model into fitted BitCoin Price
+fitted.values <- function(forecastResult, transformed_series)
+{
+  fitted.res <- forecastResult@forecast$seriesFor
+  invdiff <- diffinv(fitted.res)
+  latest_value <- transformed_series[length(transformed_series)]
+  fitted.value.list <- c()
+  for(i in 2:length(invdiff))
+  {
+    trans.fitted.value <- latest_value + invdiff[i]
+    fitted.value.list <- c(fitted.value.list, exp(trans.fitted.value))
+    latest_value <- trans.fitted.value
+  }
+  return(fitted.value.list)
+}
+
+
+#This function create model and return MASE results for 10 forecasts
+checkMASE <- function(model, data_model, data.trans, observed)
+{
+ # model <- modelfit(garchOrder, armaOrder, data_model)
+  forcRes = ugarchforecast(model, data = data_model, n.ahead = 10)
+  predicted_result <- fitted.values(forcRes, data.trans)
+  rs <- MASE(observed,predicted_result)$MASE
+  return(rs)
+}
+
+# Load dataset
+bitcoin <- read.csv("Bitcoin_Historical_Price.csv")
+bitcoin_ts <- data.frame(bitcoin$Close)
+rownames(bitcoin_ts) <- bitcoin$Date
+bitcoin_ts <- ts(as.vector(bitcoin_ts), start = c(2013,27,4), frequency = 365) # Convert Bitcoin price data into Time Series Object
+plot(bitcoin_ts, type= 'o', main="Bit Coin Price Series from 27/04/2013 - 24/02/2019")
+```
+
+Bit Coint series plot illustrates that there is no seasonality. This series fluctuates from 2013 to 2017 and then go up signficantly. It reaches a peak at nearly 20000 USD for some days in the end of 2017. After that it falls considerably in 2018 and 2019. It has succeeding points and changes of variance.  
+
+```{r message=FALSE, warning=FALSE}
+# Scatter plot
+plot(y = bitcoin_ts, x = zlag(bitcoin_ts), main = "Scatter Plot of Bit Coin within Previous Day")
+```
+
+Scatter plot shows a strong relationship between Bit Coint Price and its lag.
+
+```{r}
+acf(bitcoin_ts, na.action = na.pass, main ="ACF plot of Bit Coin series") # ACF Plot
+pacf(bitcoin_ts, na.action = na.pass, main = "PACF plot of Bit Coin Series") # PACF plot
+```
+
+ACF plot has decaying pattern. In conclustion, Bit Coin price is a non-stationary series. In the next parts, transformation and difference are applied to transfer non-stationary series into stationary series. </br>
+
+# Data Transformation and Difference
+## Data transformation
+
+Log is applied for transforming data because this series skews to the right in its histogram plot and has positive values.
+
+```{r}
+# Log Transform
+log.bc <- log(bitcoin_ts)
+hist(bitcoin_ts, main = "Histogram of Bit Coin Series before transformation", xlab = "Bit Coin Price", cex.main=1)
+hist(log.bc, main = "Histogram of Bit Coin Series after transformation", xlab = "Log Transform of Bit Coin", cex.main=1)
+```
+
+_*ACF and PACF of transformed data*_
+
+```{r}
+
+acf(log.bc, na.action = na.pass, main = "ACF of transformed Bit Coin", cex.main= 1)
+pacf(log.bc, na.action = na.pass,  main = "PACF of transformed Bit Coin", cex.main= 1)
+```
+After transformation, the series still got decapying pattern in ACF. It means that it is still a non-stationary sereis. ADF Test is applied to validate the stationary of series </br>
+
+```{r}
+ar(diff(log.bc)) # Order 31
+adfTest(log.bc, lags = 31)
+```
+
+The p-value of ADF Test is 0.9232 larger than 0.05. Therefore, Null hypothesis cannot be rejected. It means that series is non-stationary series. </br>
+
+_*Ljung-Box Test*_
+
+```{r}
+Box.test(x = log.bc, type = "Ljung-Box")
+```
+
+The p-value is less than 5% of significance level. Therefore, null hypothesis of independence is rejected. It means that the series values are dependents or correlated.
+
+## Data Difference
+
+Apply first difference for transformed series. </br>
+
+```{r}
+diff.log.bc <- (diff(log.bc, difference =1)) 
+plot(diff.log.bc, type= 'o', main = "First difference of Bit Coin series")
+abline(h=0)
+```
+The above series plot looks like moving average model. </br>
+Apply ADF Test for this series
+
+```{r}
+# ADF Test
+ar(diff(diff.log.bc), na.action = na.pass) # Order is 32
+adfTest(diff.log.bc, lags = 32)
+```
+With order of lag is 32, the differenced series becomes stationary </br>
+
+
+_*Apply McLeod-Li Test*_
+
+```{r}
+
+McLeod.Li.test(y=diff.log.bc, main="McLeod-Li Test Statistics for Bit Coin Returns")
+```
+It is clearly observed in McLeod-Li Test result that all lags are signficant at 5% significance level. It implies the existence of volatility clustering.
+
+_*Q-Q plot*_
+
+```{r}
+qqnorm(diff.log.bc, main="Q-Q plot of 1st Difference Bit Coint Price", cex.main= 1)
+qqline(diff.log.bc, col="red")
+```
+
+```{r}
+shapiro.test(diff.log.bc)
+```
+
+Q-Q normal plot shows that there are so many outliers at both tails. The p-value of Shapiro-Wilk test is less than 0.05. It implies that the first difference of bit coin violates normality assumption. </br>
+
+_*ACF and PACF plots*_
+
+```{r}
+acf(diff.log.bc , na.action = na.pass, main = "ACF for 1st difference of series", cex.main= 1)
+pacf(diff.log.bc , na.action = na.pass, main = "PACF for 1st difference of series", cex.main= 1)
+```
+
+There are so many siginficant lags in both ACF and PACF plots. There are no distinct between both plots. </br>
+Due to stationarity and changes of variances problems in original series. In this report, ARMA + GARCH model is applied. </br>
+
+# Data Modeling
+
+## ARIMA model
+
+_*EACF*_
+
+```{r}
+eacf(diff.log.bc)
+```
+
+EACF suggests possibles models like ARIMA(0,1,11),  ARIMA(6,1,7), ARIMA(6,1,8), ARIMA(7,1,7)
+
+_*BIC Table*_
+
+```{r}
+bic = armasubsets(y=diff.log.bc,nar=13,nma=13,y.name='test',ar.method='ols')
+plot(bic)
+```
+
+BIC table suggests ARIMA(6,1,8), ARIMA(12,1,8) </br>
+
+The set of possible ARIMA models is {ARIMA(0,1,11),  ARIMA(6,1,7), ARIMA(6,1,8), ARIMA(7,1,7), ARIMA(12,1,8)}
+
+### Parameter Estimation </br>
+
+Maximum Likelihood method is considered to estimate parameters </br>
+
+```{r message=FALSE, warning=FALSE}
+armaList <- list(c(0,1,11), c(6,1,7), c(6,1,8) ,c(7,1,7),c(12,1,8))
+armaEstimation <- myCandidate(bitcoin_ts, orderList = armaList, methodType = "ML")
+armaEstimation$IC
+```
+
+ARIMA(12,1,8) got smallest AIC and BIC result. </br>
+
+_*Coefficient Test*_
+
+Coefficient Test is applied for all possible models based on AIC and BIC result orderly. </br>
+
+_ARIMA(12,1,8)_
+
+```{r}
+arima.1218 <- arima(bitcoin_ts, order = c(12,1,8))
+coeftest(arima.1218)
+```
+
+There are only three coefficients of ar2, ar9 and ma2 not significant at 5%
+
+_ARIMA(6,1,8)_
+
+```{r}
+arima.618 <- arima(bitcoin_ts, order = c(6,1,8))
+coeftest(arima.618)
+```
+
+Most of coefficients for this model are significant, except ma7 and ar2. </br>
+
+_*ARIMA(6,1,7)*_
+
+```{r}
+arima.617 <- arima(bitcoin_ts, order = c(6,1,7))
+coeftest(arima.617)
+```
+
+Most of coefficients for this model are significant, except ma4, ma5 and ma7 
+
+_ARIMA(7,1,7)_
+
+```{r}
+arima.717 <- arima(bitcoin_ts, order = c(7,1,7))
+coeftest(arima.717)
+```
+
+The majority of coefficients in this model is not significant.
+
+_ARIMA(0,1,11)_
+
+```{r}
+arima.0111 <- arima(bitcoin_ts, order = c(0,1,11))
+coeftest(arima.0111)
+```
+
+
+Coefficients for ma2, ma3, ma4, ma6, ma9 in arima (0,1,11) are not significant.
+From coefficients test result and AIC/BIC table, the set of arimal model {ARIMA(6,1,8), ARIMA(12,1,8)} is considered for dianotics check.
+
+### MODEL DIAGNOTICS
+
+_*ARIMA(6,1,8)*_
+
+```{r message=FALSE, warning=FALSE}
+residual.analysis(model = arima.618, class = "ARIMA")
+```
+
+_*ARIMA(12,1,8)*_
+
+```{r message=FALSE, warning=FALSE}
+residual.analysis(model = arima.1218, class = "ARIMA")
+```
+
+It is clearly to see that both ARIMA(12,1,8) and ARIMA(6,1,8) failed in Ljung-Box Test and violate normality of residuals. In next part, garch models are selected based on residuals of two these models. 
+
+## GARCH
+
+#### ARIMA(6,1,8)
+
+_*Absolute*_
+
+```{r}
+res.618 <- arima.618$residuals
+# Apply absolute transform
+ab.res.618 <- abs(res.618)
+# ACF and PACF plots
+acf(ab.res.618,  ci.type="ma",main="ACF plot for absolute residual series ARIMA(6,1,8)", cex.main= 1)
+pacf(ab.res.618, main="PACF plot for absolute residual series ARIMA(6,1,8)", cex.main= 1)
+```
+
+
+```{r}
+eacf(ab.res.618)
+```
+
+No AR/MA is suggested from eacf of absoluated residuales
+
+_*Squared Transform*_
+
+```{r}
+sq.res.618 <- res.618^2
+acf(sq.res.618, ci.type="ma",main="ACF plot for square residual series ARIMA(6,1,8)", cex.main= 1)
+pacf(sq.res.618, main="PACF plot for square residual series ARIMA(6,1,8)", cex.main= 1)
+```
+
+```{r}
+eacf(sq.res.618)
+```
+
+EACF plot suggests ARMA(5,7), ARMA(6,7), ARMA(5,8) => GARCH(7,5), GARCH(7,6), GARCH(8,5) </br>
+The possible GARCH models are GARCH(7,5), GARCH(7,6), GARCH(8,5).
+
+
+```{r}
+list_garchOrder <- list(c(7,5), c(7,6), c(8,5))
+sortAIC_garch(list_garchOrder, arima.618$residuals)
+```
+
+_*ARIMA(12,1,8)*_
+
+```{r}
+res.1218 <- arima.1218$residuals
+ab.res.1218 <- abs(res.1218)
+# ACF and PACF plots
+acf(ab.res.1218,  ci.type="ma",main="ACF plot for absolute residual series ARIMA(12,1,8)", cex.main= 1)
+pacf(ab.res.1218, main="PACF plot for absolute residual series ARIMA(12,1,8)", cex.main= 1)
+```
+
+```{r}
+eacf(ab.res.1218)
+```
+
+EACF suggest ARMA(5,7), ARMA(6,7), ARMA(5,8) => GARCH(7,5), GARCH(7,6), GARCH(8,5)
+
+```{r}
+sq.res.1218 <- res.1218^2
+eacf(sq.res.1218)
+```
+EACF suggests ARMA(1,9), ARMA(4,8), ARMA(5,8), ARMA(4,9) => GARCH(9,1), GARCH(8,4), GARCH(8,5), GARCH(9,4)
+
+Possibles GARCH model: {GARCH(7,5), GARCH(7,6), GARCH(8,5),GARCH(9,1), GARCH(8,4), GARCH(9,4) }
+
+```{r}
+list_garchOrder1218 <- list(c(7,5), c(7,6), c(8,5), c(9,1), c(8,4), c(9,4))
+sortAIC_garch(list_garchOrder1218, arima.1218$residuals)
+```
+
+## ARIMA + GARCH
+### ARIMA(6,1,8) + GARCH(7,5)
+
+```{r message=FALSE, warning=FALSE}
+model.618_75 <- modelfit(c(7,5), c(6,8), diff.log.bc)
+model.618_75
+```
+
+
+### ARIMA(6,1,8) + GARCH(7,6)
+
+```{r message=FALSE, warning=FALSE}
+model.618_76 <- modelfit(c(7,6), c(6,8), diff.log.bc)
+model.618_76
+```
+
+
+### ARIMA(6,1,8) + GARCH(8,5)
+
+```{r message=FALSE, warning=FALSE}
+model.618_85 <- modelfit(c(8,5), c(6,8), diff.log.bc)
+model.618_85
+```
+
+### ARIMA(12,1,8) + GARCH(7,5)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_75 <- modelfit(c(7,5), c(12,8), diff.log.bc)
+model.1218_75
+```
+
+### ARIMA(12,1,8) + GARCH(7,6)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_76 <- modelfit(c(7,6), c(12,8), diff.log.bc)
+model.1218_76
+```
+
+### ARIMA(12,1,8) + GARCH(9,1)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_91 <- modelfit(c(9,1), c(12,8), diff.log.bc)
+model.1218_91
+```
+
+### ARIMA(12,1,8) + GARCH(8,4)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_84 <- modelfit(c(8,4), c(12,8), diff.log.bc)
+model.1218_84
+```
+
+### ARIMA(12,1,8) + GARCH(9,4)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_94 <- modelfit(c(9,4), c(12,8), diff.log.bc)
+model.1218_94
+```
+
+
+### ARIMA(12,1,8) + GARCH(8,5)
+
+```{r message=FALSE, warning=FALSE}
+model.1218_85<- modelfit(c(8,5), c(12,8), diff.log.bc)
+model.1218_85
+```
+
+Model ARIMA(6,1,8) + GARCH(7,6) is the best one </br>
+
+# Validation
+
+```{r}
+actual_result <- read.csv("Bitcoin_Prices_Forecasts.csv")
+observed <- as.numeric(actual_result$Closing.price)
+```
+
+_*ARIMA(6,1,8) + GARCH(7,6)*_
+
+```{r}
+checkMASE(model.618_76, diff.log.bc, log.bc, observed)
+```
+
+_*ARIMA(6,1,8) + GARCH(7,5)*_
+
+```{r}
+checkMASE(model.618_75, diff.log.bc, log.bc, observed)
+```
+
+_*ARIMA(6,1,8) + GARCH(8,5)*_
+
+```{r}
+checkMASE(model.618_75, diff.log.bc, log.bc, observed)
+```
+
+_*ARIMA(12,1,8) + GARCH(9,1)*_
+
+```{r message=FALSE, warning=FALSE}
+checkMASE(model.1218_91, diff.log.bc, log.bc, observed)
+```
+
+_*ARIMA(12,1,8) + GARCH(9,4)*_
+
+```{r message=FALSE, warning=FALSE}
+checkMASE(model.1218_94, diff.log.bc, log.bc, observed)
+```
+
+_*ARIMA(12,1,8) + GARCH(7,6)*_
+
+```{r}
+checkMASE(model.1218_76, diff.log.bc, log.bc, observed)
+```
+
+
+
+_*ARIMA(12,1,8) + GARCH(8,5)*_
+
+```{r}
+checkMASE(model.1218_85, diff.log.bc, log.bc, observed)
+```
+
+# CONCLUSION
+
+Model ARIMA(6,1,8) + GARCH (7,6) is the best model. Its predicted values for next 10 days as below
+
+```{r}
+forcRes = ugarchforecast(model.618_76, data = data_model, n.ahead = 10, n.roll = 10)
+data.frame(fitted.values(forcRes, log.bc))
+```
+
+
